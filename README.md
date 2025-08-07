@@ -15,7 +15,7 @@
 ## Features
 - 🤖 **AI-Powered** - Uses ChatGPT to intelligently organize files
 - 📁 **Right-Click Integration** - Works directly from Windows Explorer  
-- 🛡️ **Safe** - Never renames files, only moves them into folders
+- 🛡️ **Safe** - Never renames/deletes files, only moves them into folders
 - ⚡ **Fast** - Single PowerShell script
 
 ## Install
