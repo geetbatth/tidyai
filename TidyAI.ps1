@@ -39,13 +39,13 @@ function Write-ColorText {
 
 # Console Colors
 $Colors = @{
-    Primary = "Cyan"
+    Primary = "DarkRed"
     Secondary = "Yellow" 
-    Success = "Green"
+    Success = "Yellow"
     Warning = "DarkYellow"
     Error = "Red"
     Info = "White"
-    Accent = "Magenta"
+    Accent = "DarkYellow"
 }
 
 # ==============================================================================
@@ -72,17 +72,6 @@ if ([string]::IsNullOrWhiteSpace($OPENAI_API_KEY)) {
     Write-ColorText "After setting the key, restart this application." $Colors.Warning
     Read-Host "Press Enter to exit"
     return
-}
-
-# Console Colors
-$Colors = @{
-    Primary = "Cyan"
-    Secondary = "Yellow" 
-    Success = "Green"
-    Warning = "DarkYellow"
-    Error = "Red"
-    Info = "White"
-    Accent = "Magenta"
 }
 
 # File type icons for better visual representation (ASCII only)
@@ -231,7 +220,7 @@ function Scan-Folder {
                 $filledWidth = [math]::Round(($percentComplete / 100) * $barWidth)
                 $emptyWidth = $barWidth - $filledWidth
                 $progressBar = "#" * $filledWidth + "-" * $emptyWidth
-                Write-Host "`r[$progressBar] $percentComplete% ($processedItems/$totalItems)" -NoNewline -ForegroundColor Cyan
+                Write-Host "`r[$progressBar] $percentComplete% ($processedItems/$totalItems)" -NoNewline -ForegroundColor Yellow
             }
             
             if ($item.PSIsContainer) {
