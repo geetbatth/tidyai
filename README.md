@@ -10,6 +10,10 @@
         ####     #### ########      ####        ####  #### ## ####
 ```
 
+<div align="center">
+<img src="https://raw.githubusercontent.com/geetbatth/tidyai/main/media/screenshot.jpg" alt="TidyAI Screenshot" width="600">
+</div>
+
 # AI-powered file organization for Windows
 
 ## Features
@@ -20,6 +24,14 @@
 - 📦 **Batch Processing** - Handles large folders by processing files in batches
 - 💰 **Cost-Effective** - Uses GPT-4 Mini model, very cheap to run
 - ⚡ **Pure PowerShell** - No external dependencies, runs on any Windows machine
+
+## 🎬 TidyAI in Action
+
+<div align="center">
+<img src="https://raw.githubusercontent.com/geetbatth/tidyai/main/media/demo.gif" alt="TidyAI Demo" width="600">
+</div>
+
+
 
 ## Install
 1. Right-click `setup.bat` → "Run as administrator"
