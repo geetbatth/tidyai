@@ -1,5 +1,6 @@
 # ==============================================================================
 # TidyAI Uninstaller
+# Version 2.0.0 - Modular Architecture
 # Removes TidyAI from the system completely
 # ==============================================================================
 
@@ -12,11 +13,11 @@ if (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
 
 # Console Colors
 $Colors = @{
-    Primary   = "Cyan"
-    Secondary = "Blue"
-    Accent    = "Yellow"
-    Success   = "Green"
-    Warning   = "Yellow"
+    Primary   = "DarkRed"
+    Secondary = "Yellow"
+    Accent    = "DarkYellow"
+    Success   = "Yellow"
+    Warning   = "DarkYellow"
     Error     = "Red"
     Info      = "White"
 }

@@ -1,6 +1,6 @@
 # ==============================================================================
 # TidyAI Installer - Context Menu Integration Setup
-# Version 1.0.0
+# Version 2.0.0 - Modular Architecture
 # ==============================================================================
 
 # Requires Administrator privileges
@@ -32,19 +32,19 @@ $REGISTRY_DESKTOP_COMMAND_KEY = "HKCR:\DesktopBackground\Shell\TidyAI\command"
 
 # Registry paths for Windows uninstaller
 $UNINSTALL_KEY = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\TidyAI"
-$APP_VERSION = "1.0.0"
+$APP_VERSION = "2.0.0"
 $APP_PUBLISHER = "TidyAI"
 $APP_DISPLAY_NAME = "TidyAI - Intelligent Folder Organization"
 
 # Console Colors
 $Colors = @{
-    Primary = "Cyan"
+    Primary = "DarkRed"
     Secondary = "Yellow" 
-    Success = "Green"
+    Success = "Yellow"
     Warning = "DarkYellow"
     Error = "Red"
     Info = "White"
-    Accent = "Magenta"
+    Accent = "DarkYellow"
 }
 
 # ==============================================================================
@@ -245,14 +245,15 @@ function Install-TidyAI {
         }
         Show-ProgressStep "Installation directory created" "Success"
         
-        # Step 2: Copy TidyAI script
-        Show-ProgressStep "Copying TidyAI script"
+        # Step 2: Copy TidyAI script and modules
+        Show-ProgressStep "Copying TidyAI script and modules"
         $currentScriptDir = if ($MyInvocation.MyCommand.Path) {
             Split-Path -Parent $MyInvocation.MyCommand.Path
         } else {
             Get-Location
         }
         $sourcePath = Join-Path $currentScriptDir $SCRIPT_NAME
+        $modulesSourcePath = Join-Path $currentScriptDir "Modules"
         
         if (-not (Test-Path $sourcePath)) {
             Show-ProgressStep "TidyAI.ps1 not found in current directory" "Error"
@@ -260,8 +261,20 @@ function Install-TidyAI {
             return $false
         }
         
+        if (-not (Test-Path $modulesSourcePath)) {
+            Show-ProgressStep "Modules folder not found in current directory" "Error"
+            Write-ColorText "Please ensure the Modules folder is in the same directory as this installer." $Colors.Warning
+            return $false
+        }
+        
+        # Copy main script
         Copy-Item $sourcePath $SCRIPT_PATH -Force
         Show-ProgressStep "TidyAI script copied successfully" "Success"
+        
+        # Copy Modules folder recursively
+        $modulesDestPath = Join-Path $INSTALL_DIR "Modules"
+        Copy-Item $modulesSourcePath $modulesDestPath -Recurse -Force
+        Show-ProgressStep "TidyAI modules copied successfully" "Success"
         
         # Step 3: Create HKCR drive if it doesn't exist
         Show-ProgressStep "Setting up registry access"
