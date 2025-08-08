@@ -42,7 +42,7 @@ function Remove-SampleFilesFromResponse {
             if ($actualItemNames -contains $item.name) {
                 $filteredItems += $item
             } else {
-                Write-ColorText "Filtered out non-existent item: $($item.name)" $Colors.Warning
+                # Write-ColorText "DEBUG: Filtered out non-existent item: $($item.name)" $Colors.Warning
             }
         }
         
@@ -78,7 +78,7 @@ function Get-JsonFromResponse {
     
     # Pattern 3: Direct JSON array (most common case)
     if ($cleaned -match '(\[[\s\S]*?\])') {
-        Write-ColorText "Found direct JSON array" $Colors.Success
+        # Write-ColorText "DEBUG: Found direct JSON array" $Colors.Success
         return $cleaned.Trim()
     }
     
@@ -121,7 +121,7 @@ function ConvertFrom-JsonResponse {
     }
     
     try {
-        Write-ColorText "Parsing JSON with PowerShell ConvertFrom-Json..." $Colors.Info
+        # Write-ColorText "DEBUG: Parsing JSON with PowerShell ConvertFrom-Json..." $Colors.Info
         
         # Clean the JSON string
         $cleanedJson = $JsonString.Trim()

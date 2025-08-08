@@ -88,30 +88,49 @@ function Invoke-UndoOrganization {
         Write-ColorText "Restoring original folder structure..." $Colors.Info
         Write-ColorText "Organization from: $($undoData.timestamp)" $Colors.Accent
         
-        # Get current items in the directory
-        $currentItems = Get-ChildItem $TargetPath -Force | Where-Object { $_.Name -ne ".tidyai" }
+        # Use the original structure data to restore files properly
+        $restoredCount = 0
+        $skippedCount = 0
         
-        # Move all items back to root level first
-        foreach ($item in $currentItems) {
-            if ($item.PSIsContainer) {
-                # Check if this is an organized folder that needs to be unpacked
-                $folderContents = Get-ChildItem $item.FullName -Force
-                foreach ($content in $folderContents) {
-                    $destinationPath = Join-Path $TargetPath $content.Name
-                    if (-not (Test-Path $destinationPath)) {
-                        Move-Item $content.FullName $destinationPath -Force
-                        Write-ColorText "  Restored: $($content.Name)" $Colors.Info
-                    }
-                }
+        # Get all organized folders (created by TidyAI)
+        $organizedFolders = Get-ChildItem $TargetPath -Directory -Force | Where-Object { $_.Name -ne ".tidyai" }
+        
+        foreach ($folder in $organizedFolders) {
+            Write-ColorText "  Processing folder: $($folder.Name)" $Colors.Accent
+            $folderContents = Get-ChildItem $folder.FullName -Force
+            
+            foreach ($content in $folderContents) {
+                $destinationPath = Join-Path $TargetPath $content.Name
                 
-                # Remove empty organized folders
-                $remainingContents = Get-ChildItem $item.FullName -Force
-                if ($remainingContents.Count -eq 0) {
-                    Remove-Item $item.FullName -Force
-                    Write-ColorText "  Removed empty folder: $($item.Name)" $Colors.Accent
+                try {
+                    if (Test-Path $destinationPath) {
+                        # File already exists in root - this indicates a conflict or duplicate
+                        Write-ColorText "    Conflict: $($content.Name) already exists in root - overwriting" $Colors.Warning
+                        Remove-Item $destinationPath -Force
+                    }
+                    
+                    # Move the file back to root
+                    Move-Item $content.FullName $destinationPath -Force
+                    Write-ColorText "    Restored: $($content.Name)" $Colors.Info
+                    $restoredCount++
+                }
+                catch {
+                    Write-ColorText "    Failed to restore: $($content.Name) - $($_.Exception.Message)" $Colors.Error
+                    $skippedCount++
                 }
             }
+            
+            # Remove the organized folder if it's empty
+            $remainingContents = Get-ChildItem $folder.FullName -Force
+            if ($remainingContents.Count -eq 0) {
+                Remove-Item $folder.FullName -Force
+                Write-ColorText "    Removed empty folder: $($folder.Name)" $Colors.Success
+            } else {
+                Write-ColorText "    Warning: Folder $($folder.Name) still contains $($remainingContents.Count) items" $Colors.Warning
+            }
         }
+        
+        Write-ColorText "Restoration summary: $restoredCount files restored, $skippedCount failed" $Colors.Info
         
         # Remove undo file
         $undoFilePath = Get-UndoFilePath -TargetPath $TargetPath
@@ -165,7 +184,7 @@ function Show-PostOrganizationPrompt {
     
     Write-Host ""
     Write-ColorText "========================================" $Colors.Primary
-    Write-ColorText "🎉 ORGANIZATION COMPLETE!" $Colors.Success
+    Write-ColorText "*** ORGANIZATION COMPLETE! ***" $Colors.Success
     Write-ColorText "========================================" $Colors.Primary
     Write-ColorText "Your files have been organized successfully!" $Colors.Info
     Write-Host ""

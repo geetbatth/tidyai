@@ -50,7 +50,8 @@ function Apply-Organization {
                             $successfulMoves++
                         }
                     } else {
-                        $errorMessages += "Item not found: $($item.name)"
+                        # Item not found - this is normal for sample files from folder metadata, skip silently
+                        # We never delete any files so we can skip this
                     }
                 }
                 catch {

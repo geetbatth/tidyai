@@ -62,7 +62,7 @@ function Start-FileOrganization {
     param([array]$Items)
     
     # Determine processing strategy based on file count
-    if ($Items.Count -le 150) {
+    if ($Items.Count -le 75) {
         # Single batch processing for smaller folders
         Invoke-SingleBatchProcessing -Files $Items
     } else {
@@ -197,7 +197,7 @@ function Invoke-MultiBatchProcessing {
 }
 
 function Invoke-BatchProcessing {
-    param([array]$Files, [array]$ExistingStructure, [int]$BatchNumber)
+    param([array]$Files, [array]$ExistingStructure, [int]$BatchNumber, [string]$RequestType = "batch")
     
     try {
         # Build JSON for this batch
@@ -205,7 +205,7 @@ function Invoke-BatchProcessing {
         
         # Send to OpenAI
         $existingFolders = $ExistingStructure | ForEach-Object { $_.folderName }
-        $response = Invoke-OpenAIRequest -JsonData $jsonData -RequestType "batch" -ExistingFolders $existingFolders -BatchNumber $BatchNumber
+        $response = Invoke-OpenAIRequest -JsonData $jsonData -RequestType $RequestType -ExistingFolders $existingFolders -BatchNumber $BatchNumber
         
         if ($null -eq $response) {
             Write-ColorText "Batch ${BatchNumber}: Failed to get AI response" $Colors.Error
@@ -307,34 +307,136 @@ function Process-MissedFiles {
     param([array]$MissedFiles, [array]$ExistingStructure)
     
     try {
-        Write-ColorText "Processing $($MissedFiles.Count) missed files..." $Colors.Info
+        Write-ColorText "Processing $($MissedFiles.Count) missed files with multi-pass recovery..." $Colors.Info
         
-        # Build JSON for missed files
-        $jsonData = New-BatchJson -Items $MissedFiles -ExistingStructure $ExistingStructure
+        $masterStructure = [System.Collections.ArrayList]@($ExistingStructure)
+        $remainingFiles = $MissedFiles
+        $passNumber = 1
+        $maxPasses = 3
         
-        # Get existing folder names for context
-        $existingFolders = $ExistingStructure | ForEach-Object { $_.folderName }
-        
-        # Send to OpenAI with recovery request type
-        $response = Invoke-OpenAIRequest -JsonData $jsonData -RequestType "recovery" -ExistingFolders $existingFolders
-        
-        if ($null -eq $response) {
-            Write-ColorText "Failed to get recovery response from AI" $Colors.Error
-            return $null
+        # Multi-pass recovery: try up to 3 complete passes
+        while ($remainingFiles.Count -gt 0 -and $passNumber -le $maxPasses) {
+            Write-ColorText "=== Recovery Pass $passNumber/$maxPasses - Processing $($remainingFiles.Count) files ===" $Colors.Info
+            
+            # Process all remaining files in 75-item batches for this pass
+            $passResult = Process-FilesInBatches -Files $remainingFiles -ExistingStructure $masterStructure -PassNumber $passNumber
+            
+            if ($passResult) {
+                # Update master structure with results from this pass
+                $masterStructure = $passResult
+                
+                # Check what files are still missing after this complete pass
+                $originalFileNames = $MissedFiles | ForEach-Object { $_.name }
+                $organizedFileNames = @()
+                foreach ($folder in $masterStructure) {
+                    foreach ($item in $folder.items) {
+                        $organizedFileNames += $item.name
+                    }
+                }
+                
+                # Find files that are still not organized
+                $stillMissing = @()
+                foreach ($originalFile in $MissedFiles) {
+                    if ($organizedFileNames -notcontains $originalFile.name) {
+                        $stillMissing += $originalFile
+                    }
+                }
+                
+                $remainingFiles = $stillMissing
+                Write-ColorText "Pass $passNumber completed. $($remainingFiles.Count) files still need processing." $Colors.Info
+            } else {
+                Write-ColorText "Pass $passNumber failed completely" $Colors.Warning
+            }
+            
+            $passNumber++
+            Write-Host ""
         }
         
-        # Process AI response
-        $recoveryStructure = ConvertFrom-AIResponse -JsonResponse $response -OriginalItems $MissedFiles
-        
-        if ($recoveryStructure) {
-            Write-ColorText "Successfully processed $($MissedFiles.Count) missed files" $Colors.Success
-            return $recoveryStructure
+        # If we still have files after all passes, move them to "Unorganized Files" folder
+        if ($remainingFiles.Count -gt 0) {
+            Write-ColorText "Moving final $($remainingFiles.Count) files to 'Unorganized Files' folder..." $Colors.Warning
+            $unorganizedFolder = Create-UnorganizedFolder -MissedFiles $remainingFiles
+            if ($unorganizedFolder) {
+                # Ensure masterStructure is an ArrayList before adding
+                if ($masterStructure -isnot [System.Collections.ArrayList]) {
+                    $masterStructure = [System.Collections.ArrayList]@($masterStructure)
+                }
+                $masterStructure.Add($unorganizedFolder) | Out-Null
+                Write-ColorText "Created 'Unorganized Files' folder for $($remainingFiles.Count) files" $Colors.Success
+            }
         }
         
-        return $null
+        return @($masterStructure)
     }
     catch {
         Write-ColorText "Error processing missed files: $($_.Exception.Message)" $Colors.Error
+        return $null
+    }
+}
+
+function Process-FilesInBatches {
+    param([array]$Files, [array]$ExistingStructure, [int]$PassNumber)
+    
+    try {
+        $masterStructure = [System.Collections.ArrayList]@($ExistingStructure)
+        $allFiles = $Files | Sort-Object name
+        $batchNumber = 1
+        $currentBatchSize = 75
+        $totalBatches = [Math]::Ceiling($Files.Count / $currentBatchSize)
+        $fileIndex = 0
+        
+        while ($fileIndex -lt $allFiles.Count) {
+            $batchSize = [Math]::Min($currentBatchSize, ($allFiles.Count - $fileIndex))
+            $currentBatch = $allFiles[$fileIndex..($fileIndex + $batchSize - 1)]
+            $fileIndex += $batchSize
+            
+            Write-ColorText "  Pass $PassNumber - Batch $batchNumber/$totalBatches ($($currentBatch.Count) files)..." $Colors.Info
+            
+            $batchResult = Invoke-BatchProcessing -Files $currentBatch -ExistingStructure $masterStructure -BatchNumber $batchNumber -RequestType "recovery"
+            
+            if ($batchResult) {
+                $masterStructure = Merge-BatchResults -MasterStructure $masterStructure -BatchResult $batchResult
+                Write-ColorText "  Pass $PassNumber - Batch $batchNumber completed" $Colors.Success
+            } else {
+                Write-ColorText "  Pass $PassNumber - Batch $batchNumber failed" $Colors.Warning
+            }
+            
+            $batchNumber++
+        }
+        
+        return @($masterStructure)
+    }
+    catch {
+        Write-ColorText "Error in batch processing: $($_.Exception.Message)" $Colors.Error
+        return $null
+    }
+}
+
+function Create-UnorganizedFolder {
+    param([array]$MissedFiles)
+    
+    try {
+        $unorganizedItems = @()
+        foreach ($file in $MissedFiles) {
+            $unorganizedItems += [PSCustomObject]@{
+                name = $file.name
+                extension = if ($file.name.Contains('.')) { 
+                    [System.IO.Path]::GetExtension($file.name) 
+                } else { 
+                    "" 
+                }
+            }
+        }
+        
+        $unorganizedFolder = [PSCustomObject]@{
+            folderName = "Unorganized Files"
+            items = $unorganizedItems
+        }
+        
+        return $unorganizedFolder
+    }
+    catch {
+        Write-ColorText "Error creating unorganized folder: $($_.Exception.Message)" $Colors.Error
         return $null
     }
 }
