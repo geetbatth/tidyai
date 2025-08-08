@@ -365,21 +365,35 @@ Respond with ONLY valid JSON (no explanations):
 function Send-OpenAIRequest {
     param([string]$Prompt, [string]$SystemMessage)
     
+    # Clean and normalize the inputs to prevent 400 errors
+    $cleanSystemMessage = $SystemMessage
+    $cleanPrompt = $Prompt
+    
+    # Remove or replace non-ASCII characters
+    $cleanSystemMessage = $cleanSystemMessage -replace '[^\x00-\x7F]', '?'
+    $cleanPrompt = $cleanPrompt -replace '[^\x00-\x7F]', '?'
+    
+    # Normalize line endings to Unix style (LF only)
+    $cleanSystemMessage = $cleanSystemMessage -replace '\r\n', '\n' -replace '\r', '\n'
+    $cleanPrompt = $cleanPrompt -replace '\r\n', '\n' -replace '\r', '\n'
+    
     $requestBody = @{
         model = "gpt-4o-mini"
         messages = @(
             @{
                 role = "system"
-                content = $SystemMessage
+                content = $cleanSystemMessage
             },
             @{
                 role = "user" 
-                content = $Prompt
+                content = $cleanPrompt
             }
         )
         max_tokens = 16384
         temperature = 0.3
     } | ConvertTo-Json -Depth 10
+
+
 
     $headers = @{
         "Authorization" = "Bearer $OPENAI_API_KEY"
@@ -388,7 +402,6 @@ function Send-OpenAIRequest {
 
     # Validate request size before sending
     $requestSize = [System.Text.Encoding]::UTF8.GetByteCount($requestBody)
-    Write-ColorText "Request size: $requestSize bytes" $Colors.Info
     
     if ($requestSize -gt 100000) {  # 100KB limit
         Write-ColorText "WARNING: Large request size may cause truncation" $Colors.Warning
@@ -436,9 +449,7 @@ function Send-OpenAIRequest {
             Write-ColorText "Could not read error details: $($_.Exception.Message)" $Colors.Warning
         }
         
-        # Show request size for debugging
-        $requestSize = [System.Text.Encoding]::UTF8.GetByteCount($requestBody)
-        Write-ColorText "Request size: $requestSize bytes" $Colors.Info
+
         
         Write-ColorText "Common causes:" $Colors.Info
         Write-ColorText "1. Invalid API key or quota exceeded" $Colors.Warning
@@ -603,9 +614,6 @@ function Process-MultiBatch {
             
             # Process this batch with simple retry logic
             $batchResult = Process-Batch -Files $currentBatch -ExistingStructure $masterStructure -BatchNumber $batchNumber
-            
-            # Check if this was a 400 error (batch result is null due to API error)
-            $was400Error = ($null -eq $batchResult)
             
             # If failed, retry once after 8 seconds
             if ($null -eq $batchResult) {
@@ -788,19 +796,27 @@ function Build-BatchJson {
     # Create minimal data structure for batch
     $minimalItems = @()
     foreach ($file in $Files) {
+        if ([string]::IsNullOrEmpty($file.name)) {
+            continue
+        }
+        
         $lastModified = [DateTime]$file.lastModified
-        $minimalItems += @{
+        $fileData = @{
             name = $file.name
             ext = $file.extension
             size = if ($file.size -gt 100MB) { "large" } elseif ($file.size -gt 10MB) { "medium" } else { "small" }
             age = if ($lastModified -gt (Get-Date).AddDays(-30)) { "recent" } else { "old" }
         }
+        
+        $minimalItems += $fileData
     }
     
     # Include existing folder structure for context
     $existingFolders = @()
     foreach ($folder in $ExistingStructure) {
-        $existingFolders += $folder.folderName
+        if (![string]::IsNullOrEmpty($folder.folderName)) {
+            $existingFolders += $folder.folderName
+        }
     }
     
     $batchInfo = @{
@@ -1315,77 +1331,9 @@ function Repair-TruncatedJson {
     return $repaired
 }
 
-# Initialize Newtonsoft.Json library for robust JSON parsing
-function Initialize-JsonLibrary {
-    # Get script directory using multiple fallback methods
-    $scriptDir = $null
-    
-    # Method 1: Try MyInvocation.MyCommand.Path
-    if ($MyInvocation.MyCommand.Path) {
-        $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-    }
-    # Method 2: Try PSScriptRoot (PowerShell 3.0+)
-    elseif ($PSScriptRoot) {
-        $scriptDir = $PSScriptRoot
-    }
-    # Method 3: Try current location
-    else {
-        $scriptDir = Get-Location
-    }
-    
-    $dllPath = Join-Path $scriptDir "Newtonsoft.Json.dll"
-    
-    if (-not (Test-Path $dllPath)) {
-        throw "Newtonsoft.Json.dll not found in script directory: $scriptDir"
-    }
-    
-    Write-ColorText "Loading JSON library from: $dllPath" $Colors.Info
-    
-    try {
-        # Primary method: Load as bytes (bypasses Windows security blocking)
-        $dllBytes = [System.IO.File]::ReadAllBytes($dllPath)
-        [System.Reflection.Assembly]::Load($dllBytes) | Out-Null
-        Write-ColorText "JSON library loaded successfully" $Colors.Success
-    }
-    catch {
-        # Fallback method: Try direct Add-Type loading
-        Write-ColorText "Primary loading method failed. Trying direct loading..." $Colors.Warning
-        
-        try {
-            # Try to unblock the file if it's blocked by Windows security
-            try {
-                Unblock-File -Path $dllPath -ErrorAction SilentlyContinue
-            } catch {
-                # Ignore unblock errors - file might not be blocked
-            }
-            
-            # Try direct loading
-            Add-Type -Path $dllPath
-            Write-ColorText "JSON library loaded successfully (direct method)" $Colors.Success
-        }
-        catch {
-            Write-ColorText "All loading methods failed. Error details:" $Colors.Error
-            Write-ColorText "  Primary error: $($_.Exception.Message)" $Colors.Error
-            Write-ColorText "  DLL path: $dllPath" $Colors.Error
-            Write-ColorText "  File exists: $(Test-Path $dllPath)" $Colors.Error
-            
-            # Check if file is blocked
-            try {
-                $zone = Get-Content "$($dllPath):Zone.Identifier" -ErrorAction SilentlyContinue
-                if ($zone) {
-                    Write-ColorText "  File is blocked by Windows security" $Colors.Error
-                    Write-ColorText "  Solution: Right-click the DLL -> Properties -> Unblock" $Colors.Warning
-                }
-            } catch {
-                # Ignore zone check errors
-            }
-            
-            throw "Failed to load JSON library: $($_.Exception.Message)"
-        }
-    }
-}
 
-# Clean, simple JSON parsing using Newtonsoft.Json
+
+# Clean, simple JSON parsing using PowerShell native ConvertFrom-Json
 function Parse-JsonResponse {
     param([string]$JsonString)
     
@@ -1396,7 +1344,7 @@ function Parse-JsonResponse {
     }
     
     try {
-        Write-ColorText "Parsing JSON with Newtonsoft.Json..." $Colors.Info
+        Write-ColorText "Parsing JSON with PowerShell ConvertFrom-Json..." $Colors.Info
         
         # Clean the JSON string
         $cleanedJson = $JsonString.Trim()
@@ -1606,16 +1554,6 @@ function Main {
     
     # Show beautiful logo
     Show-Logo
-    
-    # Initialize JSON library
-    try {
-        Initialize-JsonLibrary
-    }
-    catch {
-        Write-ColorText "Failed to initialize JSON library: $($_.Exception.Message)" $Colors.Error
-        Read-Host "Press Enter to exit"
-        return
-    }
     
     # Sanitize the folder path (remove extra quotes and normalize)
     $TargetFolder = $TargetFolder.Trim('"').Trim()

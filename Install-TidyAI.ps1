@@ -263,20 +263,6 @@ function Install-TidyAI {
         Copy-Item $sourcePath $SCRIPT_PATH -Force
         Show-ProgressStep "TidyAI script copied successfully" "Success"
         
-        # Step 2.5: Copy Newtonsoft.Json.dll
-        Show-ProgressStep "Copying JSON library"
-        $dllSourcePath = Join-Path $currentScriptDir "Newtonsoft.Json.dll"
-        $dllDestPath = Join-Path $INSTALL_DIR "Newtonsoft.Json.dll"
-        
-        if (-not (Test-Path $dllSourcePath)) {
-            Show-ProgressStep "Newtonsoft.Json.dll not found in current directory" "Error"
-            Write-ColorText "Please ensure Newtonsoft.Json.dll is in the same folder as this installer." $Colors.Warning
-            return $false
-        }
-        
-        Copy-Item $dllSourcePath $dllDestPath -Force
-        Show-ProgressStep "JSON library copied successfully" "Success"
-        
         # Step 3: Create HKCR drive if it doesn't exist
         Show-ProgressStep "Setting up registry access"
         if (-not (Get-PSDrive -Name HKCR -ErrorAction SilentlyContinue)) {
