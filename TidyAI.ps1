@@ -101,9 +101,14 @@ function Show-Logo {
 function Write-ColorText {
     param(
         [string]$Text,
-        [string]$Color = $Colors.Info,
+        [string]$Color = "White",
         [switch]$NoNewline
     )
+    
+    # Handle empty or null color
+    if ([string]::IsNullOrWhiteSpace($Color)) {
+        $Color = "White"
+    }
     
     if ($NoNewline) {
         Write-Host $Text -ForegroundColor $Color -NoNewline
@@ -191,43 +196,124 @@ function Scan-Folder {
 function Build-FolderJson {
     param([array]$Items, [string]$FolderPath)
     
-    # Create rich data structure with full context for better AI analysis
-    $enrichedItems = @()
+    # Create minimal data structure - only send what AI needs for organization
+    $minimalItems = @()
     foreach ($item in $Items) {
-        $lastModified = [DateTime]$item.lastModified
-        $enrichedItems += @{
-            name = $item.name
-            type = $item.type
-            extension = $item.extension
-            size = $item.size
-            lastModified = $item.lastModified
-            fullPath = $item.fullPath
-            # Add helpful analysis fields
-            sizeCategory = if ($item.size -gt 100MB) { "large" } elseif ($item.size -gt 10MB) { "medium" } else { "small" }
-            ageCategory = if ($lastModified -gt (Get-Date).AddDays(-7)) { "recent" } elseif ($lastModified -gt (Get-Date).AddDays(-30)) { "current" } elseif ($lastModified -gt (Get-Date).AddDays(-365)) { "old" } else { "archived" }
-            year = $lastModified.Year
-            month = $lastModified.Month
+        # Skip folders - only organize files
+        if ($item.type -eq "file") {
+            $lastModified = [DateTime]$item.lastModified
+            $minimalItems += @{
+                name = $item.name
+                ext = $item.extension
+                size = if ($item.size -gt 100MB) { "large" } elseif ($item.size -gt 10MB) { "medium" } else { "small" }
+                age = if ($lastModified -gt (Get-Date).AddDays(-30)) { "recent" } else { "old" }
+            }
         }
     }
     
+    # Minimal folder context - just what AI needs
     $folderInfo = @{
-        folderPath = $FolderPath
-        folderName = Split-Path $FolderPath -Leaf
-        totalItems = $Items.Count
-        scanDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-        items = $enrichedItems
-        # Add folder-level analysis
-        folderType = if ($FolderPath -match "Desktop") { "Desktop" } elseif ($FolderPath -match "Downloads?") { "Downloads" } elseif ($FolderPath -match "Documents?") { "Documents" } else { "General" }
+        files = $minimalItems
+        count = $minimalItems.Count
+        context = if ($FolderPath -match "Desktop") { "Desktop" } elseif ($FolderPath -match "Downloads?") { "Downloads" } elseif ($FolderPath -match "Documents?") { "Documents" } else { "General" }
     }
     
-    return $folderInfo | ConvertTo-Json -Depth 10
+    return $folderInfo | ConvertTo-Json -Depth 5
+}
+
+function Send-BatchToOpenAI {
+    param([string]$JsonData, [int]$BatchNumber, [array]$ExistingFolders)
+    
+    # Check if API key is set
+    if ([string]::IsNullOrEmpty($OPENAI_API_KEY)) {
+        Write-ColorText "OpenAI API key not found!" $Colors.Error
+        return $null
+    }
+    
+    # Parse the JSON to get file count
+    $data = $JsonData | ConvertFrom-Json
+    $fileCount = $data.count
+    
+    # Build context-aware prompt for batch processing
+    $existingFoldersText = if ($ExistingFolders.Count -gt 0) {
+        "Existing folders you can reuse: " + ($ExistingFolders -join ", ")
+    } else {
+        "This is the first batch - create initial folder structure."
+    }
+    
+    $prompt = @"
+Organize these $fileCount files into logical, intelligent folders based on content patterns and purpose.
+
+ORGANIZATION PRINCIPLES:
+- Each file appears in EXACTLY ONE folder (zero duplicates allowed)
+- Preserve ALL original filenames exactly as provided
+- ANALYZE FILE NAMES for patterns, dates, projects, purposes, and content clues
+- Group files by PURPOSE and CONTENT SIMILARITY, not just file type
+- Look for naming patterns like dates, version numbers, project names, company names
+- REUSE existing folders when appropriate for consistency
+- Create specific, meaningful folders that tell a story about the files
+
+INTELLIGENT GROUPING EXAMPLES:
+- Files with similar prefixes/suffixes (e.g., "invoice_2024", "report_Q1")
+- Files with dates or version numbers (group by time period or version)
+- Files with company/project names (group by entity)
+- Files with similar purposes (installation files, documentation, media)
+- Sequential files or series (parts 1, 2, 3 or chapters)
+
+FOLDER NAMING:
+- Use specific, descriptive names that reflect the actual content
+- Include context like dates, projects, or purposes when relevant
+- Avoid generic names like "Documents" or "Files"
+- Examples: "Invoice Records 2024", "Project Phoenix Documentation", "System Installation Files"
+
+$existingFoldersText
+
+Files to organize:
+$JsonData
+
+Respond with ONLY valid JSON (no explanations):
+[{"folderName": "Descriptive Name", "items": [{"name": "exact-filename.ext"}]}]
+"@
+    
+    return Send-OpenAIRequest -Prompt $prompt -SystemMessage "You are TidyAI, an intelligent file organization expert. Analyze file names and size, patterns, dates, projects, and purposes. Create meaningful folder structures based on content similarity and purpose, not just file extensions. Think like a human organizing their digital workspace - group related files together in a way that makes sense for productivity and easy retrieval."
+}
+
+function Send-RecoveryToOpenAI {
+    param([string]$JsonData, [array]$ExistingStructure)
+    
+    # Check if API key is set
+    if ([string]::IsNullOrEmpty($OPENAI_API_KEY)) {
+        Write-ColorText "OpenAI API key not found!" $Colors.Error
+        return $null
+    }
+    
+    # Build existing folder list
+    $existingFolders = $ExistingStructure | ForEach-Object { $_.folderName }
+    $existingFoldersText = "Current folder structure: " + ($existingFolders -join ", ")
+    
+    $prompt = @"
+These files were missed during batch processing and need to be organized.
+$existingFoldersText
+
+ORGANIZATION PRINCIPLES:
+- Each file appears in EXACTLY ONE folder
+- Preserve ALL original filenames exactly
+- REUSE existing folders when appropriate
+- Only create new folders if absolutely necessary
+- Group by file type and purpose
+
+Missed files to organize:
+$JsonData
+
+Respond with ONLY valid JSON (no explanations):
+[{"folderName": "Folder Name", "items": [{"name": "exact-filename.ext"}]}]
+"@
+    
+    return Send-OpenAIRequest -Prompt $prompt -SystemMessage "You are TidyAI recovery processor. Place missed files into the most appropriate existing folders. Only create new folders if absolutely necessary."
 }
 
 function Send-ToOpenAI {
     param([string]$JsonData)
-    
-    Write-ColorText "Sending data to ChatGPT for analysis..." $Colors.Info
-    Write-Host ""
     
     # Check if API key is set
     if ([string]::IsNullOrEmpty($OPENAI_API_KEY)) {
@@ -237,63 +323,34 @@ function Send-ToOpenAI {
         return $null
     }
     
-    # Parse the JSON to check item count and analyze patterns
+    # Parse the JSON to check item count
     $data = $JsonData | ConvertFrom-Json
-    $itemCount = $data.items.Count
+    $fileCount = $data.count
     
-    # Analyze folder context and patterns
-    $folderType = if ($data.folderPath -match "Desktop") { "Desktop" } 
-                  elseif ($data.folderPath -match "Downloads?") { "Downloads" }
-                  elseif ($data.folderPath -match "Documents?") { "Documents" }
-                  elseif ($data.folderPath -match "Pictures?") { "Pictures" }
-                  else { "General" }
-    
-    # Detect file patterns
-    $extensions = $data.items | Where-Object { $_.type -eq "file" } | Group-Object extension | Sort-Object Count -Descending | Select-Object -First 5
-    $topExtensions = ($extensions | ForEach-Object { $_.Name }) -join ", "
-    
-    # Detect date patterns (files from same time periods)
-    $recentFiles = ($data.items | Where-Object { $_.type -eq "file" -and [DateTime]$_.lastModified -gt (Get-Date).AddDays(-30) }).Count
-    $oldFiles = $itemCount - $recentFiles
-    
-    # Enhanced prompt for intelligent file organization
+    # Enhanced prompt for single-batch processing
     $prompt = @"
-First, analyze the entire collection of $itemCount files to understand the overall content patterns, file types, and user context. Then create an optimal folder structure based on your analysis.
-
-ANALYSIS PHASE:
-- Survey all file extensions to identify the primary file types present
-- Examine naming patterns to understand user workflows and projects
-- Assess the volume and distribution of different file categories
-- Identify any obvious groupings or themes in the file collection
-- Consider the user's likely use cases based on the file mix
+Analyze and organize these $fileCount files into intelligent, purpose-driven folders.
 
 ORGANIZATION PRINCIPLES:
 - Each file appears in EXACTLY ONE folder (zero duplicates allowed)
 - Preserve ALL original filenames exactly as provided
-- Create intuitive folder names that immediately convey purpose
-- Create 3-8 folders based on natural content groupings
-- Prioritize user workflow and accessibility
+- ANALYZE FILE NAMES for patterns, dates, projects, purposes, and content clues
+- Group files by PURPOSE and CONTENT SIMILARITY, not just file type
+- Look for naming patterns like dates, version numbers, project names, company names
+- Create specific, meaningful folders that tell a story about the files
 
-PRIORITIZATION HIERARCHY (in order of importance):
-1. FILE EXTENSION (highest priority) - Group by file type first (.pdf, .jpg, .exe, etc.)
-2. FILE NAME - Consider naming patterns, keywords, and implied purpose
-3. DATE - Use creation/modification dates as secondary grouping factor
+INTELLIGENT GROUPING EXAMPLES:
+- Files with similar prefixes/suffixes (e.g., "invoice_2024", "report_Q1")
+- Files with dates or version numbers (group by time period or version)
+- Files with company/project names (group by entity)
+- Files with similar purposes (installation files, documentation, media)
+- Sequential files or series (parts 1, 2, 3 or chapters)
 
-FOLDER NAMING BEST PRACTICES:
-- Use specific, descriptive names that indicate purpose or function
-- Prefer action-oriented names over generic file type categories
-- Consider the user's likely workflow and how they'll search for files
-- Group by primary use case, then by file type if needed
-- Avoid overly technical jargon unless the files are clearly technical
-- Use clear, intuitive names that don't require explanation
-
-ORGANIZATION STRATEGIES:
-- Analyze file names and extensions to infer purpose and context
-- Look for patterns in naming conventions (dates, projects, functions)
-- Group files that would logically be used together
-- Consider frequency of access - commonly used files in accessible folders
-- Balance specificity with practicality (avoid too many micro-categories)
-- Respect existing naming patterns that suggest user intent
+FOLDER NAMING:
+- Use specific, descriptive names that reflect the actual content
+- Include context like dates, projects, or purposes when relevant
+- Avoid generic names like "Documents" or "Files"
+- Examples: "Invoice Records 2024", "Project Phoenix Documentation", "System Installation Files"
 
 Files to organize:
 $JsonData
@@ -301,20 +358,26 @@ $JsonData
 Respond with ONLY valid JSON (no explanations):
 [{"folderName": "Descriptive Name", "items": [{"name": "exact-filename.ext"}]}]
 "@
+    
+    return Send-OpenAIRequest -Prompt $prompt -SystemMessage "You are TidyAI, an intelligent file organization expert. Analyze file names for patterns, dates, projects, and purposes. Create meaningful folder structures based on content similarity and purpose, not just file extensions. Think like a human organizing their digital workspace - group related files together in a way that makes sense for productivity and easy retrieval."
+}
 
+function Send-OpenAIRequest {
+    param([string]$Prompt, [string]$SystemMessage)
+    
     $requestBody = @{
         model = "gpt-4o-mini"
         messages = @(
             @{
                 role = "system"
-                content = "You are TidyAI, an expert file organization system. Create logical, user-friendly folder structures that enhance productivity. Always preserve exact filenames and avoid duplicate assignments. Focus on practical workflow over rigid categorization."
+                content = $SystemMessage
             },
             @{
                 role = "user" 
-                content = $prompt
+                content = $Prompt
             }
         )
-        max_tokens = 4000
+        max_tokens = 16384
         temperature = 0.3
     } | ConvertTo-Json -Depth 10
 
@@ -333,12 +396,7 @@ Respond with ONLY valid JSON (no explanations):
     }
     
     try {
-        Show-ProgressBar "Waiting for ChatGPT response" 50
         $response = Invoke-RestMethod -Uri $OPENAI_API_URL -Method Post -Body $requestBody -Headers $headers
-        Show-ProgressBar "Processing ChatGPT response" 100
-        Write-Host ""
-        Write-ColorText "Received response from ChatGPT!" $Colors.Success
-        Write-Host ""
         
         $content = $response.choices[0].message.content
         
@@ -348,13 +406,13 @@ Respond with ONLY valid JSON (no explanations):
         }
         
         # Check if response was cut off due to token limits
-        if ($response.choices[0].finish_reason -eq "length") {
+        $finishReason = $response.choices[0].finish_reason
+        if ($finishReason -eq "length") {
             Write-ColorText "ERROR: Response was truncated due to token limit!" $Colors.Error
             Write-ColorText "The response was cut off. Please try with fewer files or contact support." $Colors.Warning
             throw "Response truncated due to token limit. Cannot process incomplete data."
         }
         
-        Write-ColorText "Response validation: Complete ($($content.Length) characters)" $Colors.Success
         return $content
     }
     catch {
@@ -450,11 +508,368 @@ function Apply-Organization {
     }
 }
 
-function Show-OrganizationTree {
-    param([string]$JsonResponse)
+function Process-FolderOrganization {
+    param([array]$Items)
     
-    Write-ColorText "Processing ChatGPT response..." $Colors.Info
+    Write-ColorText "Analyzing folder contents..." $Colors.Info
     Write-Host ""
+    
+    # Filter out folders - only organize files
+    $files = $Items | Where-Object { $_.type -eq "file" }
+    $fileCount = $files.Count
+    
+    Write-ColorText "Found $fileCount files to organize" $Colors.Info
+    
+    if ($fileCount -eq 0) {
+        Write-ColorText "No files found to organize!" $Colors.Warning
+        return
+    }
+    
+    # Determine processing strategy
+    if ($fileCount -le 75) {
+        Write-ColorText "Small folder detected - using single-batch processing" $Colors.Success
+        Process-SingleBatch -Files $files
+    } else {
+        Write-ColorText "Large folder detected - using multi-batch processing" $Colors.Success
+        Process-MultiBatch -Files $files
+    }
+}
+
+function Process-SingleBatch {
+    param([array]$Files)
+    
+    Write-ColorText "Processing all $($Files.Count) files in single batch..." $Colors.Info
+    Write-Host ""
+    
+    try {
+        # Build JSON for single batch
+        $jsonData = Build-BatchJson -Files $Files -ExistingStructure @()
+        
+        # Send to OpenAI
+        $response = Send-ToOpenAI -JsonData $jsonData
+        
+        if ($null -eq $response) {
+            Write-ColorText "Failed to get response from ChatGPT" $Colors.Error
+            return
+        }
+        
+        # Process response
+        $structure = Process-AIResponse -JsonResponse $response
+        
+        if ($structure) {
+            # Validate final structure
+            $validatedStructure = Validate-FinalStructure -OriginalFiles $Files -OrganizedStructure $structure
+            
+            if ($validatedStructure) {
+                Display-OrganizationTree -Structure $validatedStructure
+                Confirm-AndApplyOrganization -Structure $validatedStructure
+            }
+        }
+    }
+    catch {
+        Write-ColorText "Error in single-batch processing: $($_.Exception.Message)" "Red"
+    }
+}
+
+function Process-MultiBatch {
+    param([array]$Files)
+    
+    Write-ColorText "Starting multi-batch processing for $($Files.Count) files..." $Colors.Info
+    Write-Host ""
+    
+    try {
+        # Group files by type and sort by name (for display purposes)
+        $groupedFiles = Group-FilesByType -Files $Files
+        
+        # Initialize master organization structure
+        $masterStructure = [System.Collections.ArrayList]@()
+        $processedFiles = [System.Collections.ArrayList]@()
+        
+        # Create mixed batches with adaptive sizing
+        $allFiles = $Files | Sort-Object name
+        $batchNumber = 1
+        $currentBatchSize = 75  # Start with 75, reduce if we get 400 errors
+        $consecutive400Errors = 0
+        $totalBatches = [Math]::Ceiling($Files.Count / $currentBatchSize)
+        $fileIndex = 0
+        
+        while ($fileIndex -lt $allFiles.Count) {
+            # Take up to current batch size for this batch
+            $batchSize = [Math]::Min($currentBatchSize, ($allFiles.Count - $fileIndex))
+            $currentBatch = $allFiles[$fileIndex..($fileIndex + $batchSize - 1)]
+            $fileIndex += $batchSize
+            
+            Write-ColorText "Processing batch $batchNumber/$totalBatches ($($currentBatch.Count) files, batch size: $currentBatchSize)..." $Colors.Info
+            
+            # Process this batch with simple retry logic
+            $batchResult = Process-Batch -Files $currentBatch -ExistingStructure $masterStructure -BatchNumber $batchNumber
+            
+            # Check if this was a 400 error (batch result is null due to API error)
+            $was400Error = ($null -eq $batchResult)
+            
+            # If failed, retry once after 8 seconds
+            if ($null -eq $batchResult) {
+                Write-ColorText "Batch $batchNumber failed, retrying in 8 seconds..." $Colors.Warning
+                Start-Sleep -Seconds 8
+                $batchResult = Process-Batch -Files $currentBatch -ExistingStructure $masterStructure -BatchNumber $batchNumber
+                
+                # If still failed, track consecutive 400 errors
+                if ($null -eq $batchResult) {
+                    $consecutive400Errors++
+                    Write-ColorText "Consecutive 400 errors: $consecutive400Errors" $Colors.Warning
+                    
+                    # Reduce batch size if we get multiple 400 errors
+                    if ($consecutive400Errors -ge 2 -and $currentBatchSize -gt 25) {
+                        $currentBatchSize = [Math]::Max(25, [Math]::Floor($currentBatchSize * 0.7))
+                        Write-ColorText "Reducing batch size to $currentBatchSize due to repeated 400 errors" $Colors.Warning
+                        $totalBatches = [Math]::Ceiling(($allFiles.Count - $fileIndex + $batchSize) / $currentBatchSize) + $batchNumber - 1
+                    }
+                }
+            }
+            
+            if ($batchResult) {
+                # Reset consecutive error counter on success
+                $consecutive400Errors = 0
+                
+                # Merge batch result with master structure
+                $masterStructure = Merge-BatchResults -MasterStructure $masterStructure -BatchResult $batchResult
+                
+                # Track processed files
+                foreach ($file in $currentBatch) {
+                    [void]$processedFiles.Add($file)
+                }
+                
+                Write-ColorText "Batch $batchNumber completed successfully" $Colors.Success
+            } else {
+                Write-ColorText "Batch $batchNumber failed - skipping" $Colors.Error
+            }
+            
+            $batchNumber++
+            Write-Host ""
+        }
+        
+        # Final processing loop - handle any remaining unprocessed files
+        Write-ColorText "Checking for any remaining unprocessed files..." $Colors.Info
+        
+        # Get all files that were successfully processed
+        $processedFileNames = [System.Collections.ArrayList]@()
+        foreach ($folder in $masterStructure) {
+            foreach ($item in $folder.items) {
+                [void]$processedFileNames.Add($item.name.ToLower())
+            }
+        }
+        
+        # Find unprocessed files
+        $unprocessedFiles = [System.Collections.ArrayList]@()
+        foreach ($file in $Files) {
+            if (-not $processedFileNames.Contains($file.name.ToLower())) {
+                [void]$unprocessedFiles.Add($file)
+            }
+        }
+        
+        if ($unprocessedFiles.Count -gt 0) {
+            Write-ColorText "Found $($unprocessedFiles.Count) unprocessed files - processing in final batches..." $Colors.Warning
+            
+            # Process unprocessed files in batches of 75
+            $finalFileIndex = 0
+            $finalBatchNumber = 1
+            $finalTotalBatches = [Math]::Ceiling($unprocessedFiles.Count / 75)
+            
+            while ($finalFileIndex -lt $unprocessedFiles.Count) {
+                $finalBatchSize = [Math]::Min(75, ($unprocessedFiles.Count - $finalFileIndex))
+                $finalBatch = $unprocessedFiles[$finalFileIndex..($finalFileIndex + $finalBatchSize - 1)]
+                
+                Write-ColorText "Processing final batch $finalBatchNumber/$finalTotalBatches ($($finalBatch.Count) files)..." $Colors.Info
+                
+                # Process with retry logic (use high batch numbers to avoid conflicts)
+                $adjustedBatchNumber = 1000 + $finalBatchNumber
+                $finalBatchResult = Process-Batch -Files $finalBatch -ExistingStructure $masterStructure -BatchNumber $adjustedBatchNumber
+                
+                if ($null -eq $finalBatchResult) {
+                    Write-ColorText "Final batch $finalBatchNumber failed, retrying in 5 seconds..." $Colors.Warning
+                    Start-Sleep -Seconds 5
+                    $finalBatchResult = Process-Batch -Files $finalBatch -ExistingStructure $masterStructure -BatchNumber $adjustedBatchNumber
+                }
+                
+                if ($finalBatchResult) {
+                    $masterStructure = Merge-BatchResults -MasterStructure $masterStructure -BatchResult $finalBatchResult
+                    Write-ColorText "Final batch $finalBatchNumber completed successfully" $Colors.Success
+                } else {
+                    Write-ColorText "Final batch $finalBatchNumber failed - some files may remain unorganized" $Colors.Error
+                }
+                
+                $finalFileIndex += $finalBatchSize
+                $finalBatchNumber++
+                Write-Host ""
+            }
+        } else {
+            Write-ColorText "All files were successfully processed in main batches" $Colors.Success
+        }
+        
+        # Final validation and recovery
+        Write-ColorText "Performing final validation..." $Colors.Info
+        $finalStructure = Validate-FinalStructure -OriginalFiles $Files -OrganizedStructure $masterStructure
+        
+        if ($finalStructure) {
+            Write-ColorText "Multi-batch processing completed successfully!" $Colors.Success
+            Write-Host ""
+            Display-OrganizationTree -Structure $finalStructure
+            Confirm-AndApplyOrganization -Structure $finalStructure
+        } else {
+            # Show partial results even if validation failed
+            Write-ColorText "Final validation failed, but showing partial results..." $Colors.Warning
+            
+            # Count successfully processed files
+            $processedCount = 0
+            foreach ($folder in $masterStructure) {
+                $processedCount += $folder.items.Count
+            }
+            
+            Write-ColorText "Successfully processed $processedCount out of $($Files.Count) files" $Colors.Info
+            
+            if ($masterStructure -and $masterStructure.Count -gt 0) {
+                Write-Host ""
+                Write-ColorText "Partial Organization Results:" $Colors.Info
+                Display-OrganizationTree -Structure $masterStructure
+                
+                Write-Host ""
+                Write-ColorText "Would you like to apply this partial organization? (Y/N)" $Colors.Question
+                $response = Read-Host
+                if ($response -eq 'Y' -or $response -eq 'y') {
+                    Confirm-AndApplyOrganization -Structure $masterStructure
+                } else {
+                    Write-ColorText "Partial organization not applied" $Colors.Info
+                }
+            } else {
+                Write-ColorText "No files were successfully processed" $Colors.Error
+            }
+        }
+    }
+    catch {
+        Write-ColorText "Error in multi-batch processing: $($_.Exception.Message)" "Red"
+    }
+}
+
+function Group-FilesByType {
+    param([array]$Files)
+    
+    Write-ColorText "Grouping files by type and sorting by name..." $Colors.Info
+    
+    # Group files by extension, handling files without extensions
+    $grouped = $Files | Group-Object { 
+        if ([string]::IsNullOrEmpty($_.extension)) { 
+            "(no extension)" 
+        } else { 
+            $_.extension 
+        }
+    } | Sort-Object Name
+    
+    $fileGroups = @()
+    foreach ($group in $grouped) {
+        $sortedFiles = $group.Group | Sort-Object name
+        $fileGroups += [PSCustomObject]@{
+            Extension = $group.Name
+            Count = $group.Count
+            Files = $sortedFiles
+        }
+    }
+    
+    Write-ColorText "Grouped into $($fileGroups.Count) file types:" $Colors.Success
+    foreach ($group in $fileGroups) {
+        Write-ColorText "  - $($group.Extension): $($group.Count) files" $Colors.Info
+    }
+    
+    return $fileGroups
+}
+
+function Build-BatchJson {
+    param([array]$Files, [array]$ExistingStructure)
+    
+    # Create minimal data structure for batch
+    $minimalItems = @()
+    foreach ($file in $Files) {
+        $lastModified = [DateTime]$file.lastModified
+        $minimalItems += @{
+            name = $file.name
+            ext = $file.extension
+            size = if ($file.size -gt 100MB) { "large" } elseif ($file.size -gt 10MB) { "medium" } else { "small" }
+            age = if ($lastModified -gt (Get-Date).AddDays(-30)) { "recent" } else { "old" }
+        }
+    }
+    
+    # Include existing folder structure for context
+    $existingFolders = @()
+    foreach ($folder in $ExistingStructure) {
+        $existingFolders += $folder.folderName
+    }
+    
+    $batchInfo = @{
+        files = $minimalItems
+        count = $minimalItems.Count
+        existingFolders = $existingFolders
+    }
+    
+    return $batchInfo | ConvertTo-Json -Depth 5
+}
+
+function Process-Batch {
+    param([array]$Files, [array]$ExistingStructure, [int]$BatchNumber)
+    
+    try {
+        # Build JSON for this batch
+        $jsonData = Build-BatchJson -Files $Files -ExistingStructure $ExistingStructure
+        
+        # Send to OpenAI
+        $response = Send-BatchToOpenAI -JsonData $jsonData -BatchNumber $BatchNumber -ExistingFolders ($ExistingStructure | ForEach-Object { $_.folderName })
+        
+        if ($null -eq $response) {
+            Write-ColorText "Batch ${BatchNumber}: Failed to get AI response" $Colors.Error
+            return $null
+        }
+        
+        # Process AI response
+        $batchStructure = Process-AIResponse -JsonResponse $response
+        
+        if ($batchStructure) {
+            # Remove duplicates within this batch
+            $cleanedBatch = Remove-DuplicateFileAssignments -Structure $batchStructure
+            Write-ColorText "Batch ${BatchNumber}: Processed $($Files.Count) files into $($cleanedBatch.Count) folders" $Colors.Success
+            return $cleanedBatch
+        }
+        
+        return $null
+    }
+    catch {
+        Write-ColorText "Batch ${BatchNumber}: Error processing - $($_.Exception.Message)" $Colors.Error
+        return $null
+    }
+}
+
+function Merge-BatchResults {
+    param([System.Collections.ArrayList]$MasterStructure, [array]$BatchResult)
+    
+    foreach ($batchFolder in $BatchResult) {
+        # Check if folder already exists in master structure
+        $existingFolder = $MasterStructure | Where-Object { $_.folderName -eq $batchFolder.folderName }
+        
+        if ($existingFolder) {
+            # Merge files into existing folder
+            $existingItems = [System.Collections.ArrayList]@($existingFolder.items)
+            foreach ($item in $batchFolder.items) {
+                [void]$existingItems.Add($item)
+            }
+            $existingFolder.items = $existingItems
+        } else {
+            # Add new folder to master structure
+            [void]$MasterStructure.Add($batchFolder)
+        }
+    }
+    
+    return $MasterStructure
+}
+
+function Process-AIResponse {
+    param([string]$JsonResponse)
     
     try {
         # Step 1: Clean and extract JSON from the response
@@ -463,34 +878,93 @@ function Show-OrganizationTree {
         # Step 2: Parse JSON using built-in .NET classes
         $suggestedStructure = Parse-JsonResponse -JsonString $cleanedJson
         
-        # Step 3: Validate and clean the organization structure
-        $cleanedStructure = Remove-DuplicateFileAssignments -Structure $suggestedStructure
-        
-        # Step 4: Display the organization tree
-        Display-OrganizationTree -Structure $cleanedStructure
-        
-        # Step 5: Ask for user confirmation and apply changes if approved
-        Confirm-AndApplyOrganization -Structure $cleanedStructure
-        
+        return $suggestedStructure
     }
     catch {
-        Write-ColorText "Error processing ChatGPT response: $($_.Exception.Message)" $Colors.Error
-        Write-Host ""
-        Write-ColorText "Debug Information:" $Colors.Warning
-        Write-ColorText "Response length: $($JsonResponse.Length) characters" $Colors.Info
-        
-        if ($JsonResponse.Length -gt 100) {
-            Write-ColorText "Response preview (first 200 chars): '$($JsonResponse.Substring(0, [Math]::Min(200, $JsonResponse.Length)))...'" $Colors.Info
-            Write-ColorText "Response ending (last 100 chars): '...$($JsonResponse.Substring([Math]::Max(0, $JsonResponse.Length - 100)))'" $Colors.Info
-        } else {
-            Write-ColorText "Full response: '$JsonResponse'" $Colors.Info
+        Write-ColorText "Error processing AI response: $($_.Exception.Message)" $Colors.Error
+        return $null
+    }
+}
+
+function Validate-FinalStructure {
+    param([array]$OriginalFiles, [array]$OrganizedStructure)
+    
+    Write-ColorText "Validating final organization structure..." $Colors.Info
+    
+    try {
+        # Collect all files from organized structure
+        $organizedFiles = [System.Collections.ArrayList]@()
+        foreach ($folder in $OrganizedStructure) {
+            foreach ($item in $folder.items) {
+                [void]$organizedFiles.Add($item.name.ToLower())
+            }
         }
         
-        Write-Host ""
-        Write-ColorText "Common causes:" $Colors.Warning
-        Write-ColorText "1. Response was truncated due to token limits" $Colors.Warning
-        Write-ColorText "2. Invalid JSON format from ChatGPT" $Colors.Warning
-        Write-ColorText "3. Network connectivity issues" $Colors.Warning
+        # Check for missing files
+        $missingFiles = [System.Collections.ArrayList]@()
+        foreach ($originalFile in $OriginalFiles) {
+            if (-not $organizedFiles.Contains($originalFile.name.ToLower())) {
+                [void]$missingFiles.Add($originalFile)
+            }
+        }
+        
+        # Handle missing files if any
+        if ($missingFiles.Count -gt 0) {
+            Write-ColorText "Found $($missingFiles.Count) missing files - recovering..." $Colors.Warning
+            $recoveredStructure = Recover-MissingFiles -MissingFiles $missingFiles.ToArray() -ExistingStructure $OrganizedStructure
+            
+            if ($recoveredStructure) {
+                Write-ColorText "Successfully recovered all missing files" $Colors.Success
+                return $recoveredStructure
+            } else {
+                Write-ColorText "Failed to recover missing files" $Colors.Error
+                return $null
+            }
+        }
+        
+        # Check for duplicates
+        $duplicateCheck = Remove-DuplicateFileAssignments -Structure $OrganizedStructure
+        
+        Write-ColorText "Final validation passed - all files accounted for" $Colors.Success
+        return $duplicateCheck
+    }
+    catch {
+        Write-ColorText "Error in final validation: $($_.Exception.Message)" $Colors.Error
+        return $null
+    }
+}
+
+function Recover-MissingFiles {
+    param([array]$MissingFiles, [array]$ExistingStructure)
+    
+    Write-ColorText "Asking AI to organize $($MissingFiles.Count) missed files..." $Colors.Info
+    
+    try {
+        # Build recovery JSON
+        $recoveryData = Build-BatchJson -Files $MissingFiles -ExistingStructure $ExistingStructure
+        
+        # Send to AI for recovery
+        $response = Send-RecoveryToOpenAI -JsonData $recoveryData -ExistingStructure $ExistingStructure
+        
+        if ($response) {
+            $recoveryStructure = Process-AIResponse -JsonResponse $response
+            
+            if ($recoveryStructure) {
+                # Merge recovery results with existing structure
+                $masterStructure = [System.Collections.ArrayList]@($ExistingStructure)
+                $finalStructure = Merge-BatchResults -MasterStructure $masterStructure -BatchResult $recoveryStructure
+                
+                Write-ColorText "Recovery completed successfully" $Colors.Success
+                return $finalStructure
+            }
+        }
+        
+        Write-ColorText "AI recovery failed" $Colors.Error
+        return $null
+    }
+    catch {
+        Write-ColorText "Error in recovery process: $($_.Exception.Message)" $Colors.Error
+        return $null
     }
 }
 
@@ -591,7 +1065,7 @@ function Remove-DuplicateFileAssignments {
         Write-ColorText "No duplicate file assignments found" $Colors.Success
     }
     
-    return $cleanedStructure.ToArray()
+    return $cleanedStructure
 }
 
 # Helper function to resolve duplicate file conflicts using AI
@@ -636,7 +1110,7 @@ Your response:
                 content = $conflictPrompt
             }
         )
-        max_tokens = 1000
+        max_tokens = 16384
         temperature = 0.1
     } | ConvertTo-Json -Depth 10
     
@@ -734,9 +1208,9 @@ function Extract-JsonFromResponse {
     }
     
     # Pattern 3: Direct JSON array (most common for our prompt)
-    if ($cleaned -match '(\[[\s\S]*?\])') {
+    if ($cleaned.StartsWith('[') -and $cleaned.EndsWith(']')) {
         Write-ColorText "Found JSON array in response" $Colors.Success
-        return $matches[1].Trim()
+        return $cleaned.Trim()
     }
     
     # Pattern 4: Remove any remaining markdown formatting
@@ -762,6 +1236,21 @@ function Test-JsonTruncation {
     
     $trimmed = $JsonString.Trim()
     
+    # If response is very short (less than 100 chars), be more lenient
+    if ($trimmed.Length -lt 100) {
+        # Only check basic structure for very short responses
+        if ($trimmed.StartsWith('[') -and $trimmed.EndsWith(']')) {
+            return $false  # Likely complete short array
+        }
+        if ($trimmed.StartsWith('{') -and $trimmed.EndsWith('}')) {
+            return $false  # Likely complete short object
+        }
+        # If it's very short and doesn't match basic patterns, might be truncated
+        if ($trimmed.Length -lt 20) {
+            return $true
+        }
+    }
+    
     # Check if it starts with [ but doesn't end with ]
     if ($trimmed.StartsWith('[') -and -not $trimmed.EndsWith(']')) {
         return $true
@@ -778,7 +1267,22 @@ function Test-JsonTruncation {
     $openBraces = ($trimmed.ToCharArray() | Where-Object { $_ -eq '{' }).Count
     $closeBraces = ($trimmed.ToCharArray() | Where-Object { $_ -eq '}' }).Count
     
+    # Only flag as truncated if there's a significant imbalance
     if ($openBrackets -ne $closeBrackets -or $openBraces -ne $closeBraces) {
+        # For responses longer than 1000 chars, be more strict
+        if ($trimmed.Length -gt 1000) {
+            return $true
+        }
+        # For shorter responses, check if the imbalance is significant
+        $bracketImbalance = [Math]::Abs($openBrackets - $closeBrackets)
+        $braceImbalance = [Math]::Abs($openBraces - $closeBraces)
+        if ($bracketImbalance -gt 1 -or $braceImbalance -gt 1) {
+            return $true
+        }
+    }
+    
+    # Additional check: Look for obvious truncation patterns
+    if ($trimmed.EndsWith('...') -or $trimmed.EndsWith('"...') -or $trimmed.EndsWith(',')) {
         return $true
     }
     
@@ -811,140 +1315,163 @@ function Repair-TruncatedJson {
     return $repaired
 }
 
-# Helper function to parse JSON using built-in .NET classes only
+# Initialize Newtonsoft.Json library for robust JSON parsing
+function Initialize-JsonLibrary {
+    # Get script directory using multiple fallback methods
+    $scriptDir = $null
+    
+    # Method 1: Try MyInvocation.MyCommand.Path
+    if ($MyInvocation.MyCommand.Path) {
+        $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+    }
+    # Method 2: Try PSScriptRoot (PowerShell 3.0+)
+    elseif ($PSScriptRoot) {
+        $scriptDir = $PSScriptRoot
+    }
+    # Method 3: Try current location
+    else {
+        $scriptDir = Get-Location
+    }
+    
+    $dllPath = Join-Path $scriptDir "Newtonsoft.Json.dll"
+    
+    if (-not (Test-Path $dllPath)) {
+        throw "Newtonsoft.Json.dll not found in script directory: $scriptDir"
+    }
+    
+    Write-ColorText "Loading JSON library from: $dllPath" $Colors.Info
+    
+    try {
+        # Primary method: Load as bytes (bypasses Windows security blocking)
+        $dllBytes = [System.IO.File]::ReadAllBytes($dllPath)
+        [System.Reflection.Assembly]::Load($dllBytes) | Out-Null
+        Write-ColorText "JSON library loaded successfully" $Colors.Success
+    }
+    catch {
+        # Fallback method: Try direct Add-Type loading
+        Write-ColorText "Primary loading method failed. Trying direct loading..." $Colors.Warning
+        
+        try {
+            # Try to unblock the file if it's blocked by Windows security
+            try {
+                Unblock-File -Path $dllPath -ErrorAction SilentlyContinue
+            } catch {
+                # Ignore unblock errors - file might not be blocked
+            }
+            
+            # Try direct loading
+            Add-Type -Path $dllPath
+            Write-ColorText "JSON library loaded successfully (direct method)" $Colors.Success
+        }
+        catch {
+            Write-ColorText "All loading methods failed. Error details:" $Colors.Error
+            Write-ColorText "  Primary error: $($_.Exception.Message)" $Colors.Error
+            Write-ColorText "  DLL path: $dllPath" $Colors.Error
+            Write-ColorText "  File exists: $(Test-Path $dllPath)" $Colors.Error
+            
+            # Check if file is blocked
+            try {
+                $zone = Get-Content "$($dllPath):Zone.Identifier" -ErrorAction SilentlyContinue
+                if ($zone) {
+                    Write-ColorText "  File is blocked by Windows security" $Colors.Error
+                    Write-ColorText "  Solution: Right-click the DLL -> Properties -> Unblock" $Colors.Warning
+                }
+            } catch {
+                # Ignore zone check errors
+            }
+            
+            throw "Failed to load JSON library: $($_.Exception.Message)"
+        }
+    }
+}
+
+# Clean, simple JSON parsing using Newtonsoft.Json
 function Parse-JsonResponse {
     param([string]$JsonString)
     
-    # Strict validation: Reject any truncated responses immediately
-    $isTruncated = Test-JsonTruncation -JsonString $JsonString
-    if ($isTruncated) {
-        Write-ColorText "ERROR: Detected truncated JSON response!" $Colors.Error
-        Write-ColorText "TidyAI requires complete responses. Please try again." $Colors.Warning
-        throw "Response was truncated. Cannot process incomplete data."
-    }
-    
-    # Additional validation: Check for minimum expected structure
+    # Check for minimum expected structure first
     if (-not ($JsonString.Contains('folderName') -and $JsonString.Contains('items'))) {
         Write-ColorText "ERROR: Response missing required structure (folderName/items)" $Colors.Error
         throw "Invalid response format. Expected folder structure not found."
     }
     
-    # Method 1: Try PowerShell's built-in ConvertFrom-Json (available in PS 3.0+)
     try {
-        Write-ColorText "Attempting PowerShell ConvertFrom-Json..." $Colors.Info
-        $parsed = $JsonString | ConvertFrom-Json -ErrorAction Stop
+        Write-ColorText "Parsing JSON with Newtonsoft.Json..." $Colors.Info
         
-        # Validate structure
-        if ($parsed -is [System.Array] -and $parsed.Count -gt 0) {
-            Write-ColorText "Successfully parsed JSON array with $($parsed.Count) folders" $Colors.Success
-            return $parsed
-        } elseif ($parsed -and $parsed.PSObject.Properties.Name -contains 'folderName') {
-            # Single object, wrap in array
-            Write-ColorText "Parsed single folder object, wrapping in array" $Colors.Success
-            return @($parsed)
+        # Clean the JSON string
+        $cleanedJson = $JsonString.Trim()
+        # Remove any BOM or invisible characters
+        $cleanedJson = $cleanedJson -replace '^\uFEFF', ''
+        # Normalize line endings
+        $cleanedJson = $cleanedJson -replace '\r\n', '\n' -replace '\r', '\n'
+        
+        # Use PowerShell's built-in ConvertFrom-Json for simpler object access
+        $jsonData = $cleanedJson | ConvertFrom-Json
+        
+        # Convert to PowerShell objects and validate structure
+        $folders = @()
+        
+        # Handle both array and single object responses
+        $itemsToProcess = @()
+        if ($jsonData -is [array]) {
+            $itemsToProcess = $jsonData
         } else {
-            throw "Invalid structure: expected array of folder objects"
+            $itemsToProcess = @($jsonData)
         }
-    }
-    catch {
-        Write-ColorText "PowerShell parser failed: $($_.Exception.Message)" $Colors.Warning
-    }
-    
-    # Method 2: Try with increased depth (PS 6.0+ feature, fallback gracefully)
-    try {
-        Write-ColorText "Attempting ConvertFrom-Json with depth parameter..." $Colors.Info
-        $parsed = $JsonString | ConvertFrom-Json -Depth 50 -ErrorAction Stop
         
-        if ($parsed -is [System.Array] -and $parsed.Count -gt 0) {
-            Write-ColorText "Successfully parsed with depth parameter" $Colors.Success
-            return $parsed
-        }
-    }
-    catch {
-        Write-ColorText "Depth parameter not supported or failed: $($_.Exception.Message)" $Colors.Warning
-    }
-    
-    # Method 3: Enhanced manual JSON parsing using .NET Regex (last resort)
-    try {
-        Write-ColorText "Attempting enhanced manual JSON parsing..." $Colors.Info
-        $folders = Parse-JsonManually -JsonString $JsonString
-        
-        if ($folders -and $folders.Count -gt 0) {
-            Write-ColorText "Successfully parsed manually with $($folders.Count) folders" $Colors.Success
-            return $folders
-        }
-    }
-    catch {
-        Write-ColorText "Manual parsing failed: $($_.Exception.Message)" $Colors.Warning
-    }
-    
-    throw "All JSON parsing methods failed. The response may be malformed or truncated."
-}
-
-# Enhanced manual JSON parsing for edge cases (using only built-in .NET classes)
-function Parse-JsonManually {
-    param([string]$JsonString)
-    
-    $folders = @()
-    
-    try {
-        # More flexible pattern that handles nested structures and whitespace better
-        $folderPattern = '\{[^{}]*?"folderName"\s*:\s*"([^"]+)"[^{}]*?"items"\s*:\s*\[([^\]]*?)\]'
-        $matches = [regex]::Matches($JsonString, $folderPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [System.Text.RegularExpressions.RegexOptions]::Singleline)
-        
-        Write-ColorText "Found $($matches.Count) folder matches in manual parsing" $Colors.Info
-        
-        foreach ($match in $matches) {
-            $folderName = $match.Groups[1].Value.Trim()
-            $itemsString = $match.Groups[2].Value.Trim()
-            
-            Write-ColorText "Processing folder: $folderName" $Colors.Info
-            
-            # Parse items within this folder with more flexible pattern
-            $items = @()
-            # Handle both {"name": "filename"} and simplified {"name":"filename"} formats
-            $itemPattern = '\{\s*"name"\s*:\s*"([^"]+)"[^}]*\}'
-            $itemMatches = [regex]::Matches($itemsString, $itemPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-            
-            Write-ColorText "Found $($itemMatches.Count) items in folder $folderName" $Colors.Info
-            
-            foreach ($itemMatch in $itemMatches) {
-                $fileName = $itemMatch.Groups[1].Value.Trim()
-                $extension = if ($fileName.Contains('.')) { 
-                    [System.IO.Path]::GetExtension($fileName) 
-                } else { 
-                    "" 
+        foreach ($item in $itemsToProcess) {
+            if ($item.folderName -and $item.items) {
+                $folderObj = [PSCustomObject]@{
+                    folderName = $item.folderName
+                    items = @()
                 }
                 
-                $items += [PSCustomObject]@{
-                    name = $fileName
-                    extension = $extension
+                foreach ($fileItem in $item.items) {
+                    if ($fileItem.name) {
+                        $fileName = $fileItem.name
+                        $extension = if ($fileName.Contains('.')) { 
+                            [System.IO.Path]::GetExtension($fileName) 
+                        } else { 
+                            "" 
+                        }
+                        
+                        $folderObj.items += [PSCustomObject]@{
+                            name = $fileName
+                            extension = $extension
+                        }
+                    }
                 }
-            }
-            
-            # Only add folders that have items
-            if ($items.Count -gt 0) {
-                $folders = $folders + [PSCustomObject]@{
-                    folderName = $folderName
-                    items = $items
+                
+                if ($folderObj.items.Count -gt 0) {
+                    $folders += $folderObj
                 }
             }
         }
         
-        # If no complete folders found, log the issue but don't try partial extraction
-        # We want all-or-none, not partial data
         if ($folders.Count -eq 0) {
-            Write-ColorText "No complete folders found in manual parsing" $Colors.Error
-            throw "Manual parsing failed to extract complete folder structure"
+            throw "No valid folders found in JSON response"
+        }
+        
+        Write-ColorText "Successfully parsed JSON with $($folders.Count) folders" $Colors.Success
+        return $folders
+        
+    }
+    catch [System.Exception] {
+        Write-ColorText "JSON parsing failed: $($_.Exception.Message)" $Colors.Error
+        
+        # Check if response might be truncated
+        $isTruncated = Test-JsonTruncation -JsonString $JsonString
+        if ($isTruncated) {
+            Write-ColorText "ERROR: Response appears to be truncated!" $Colors.Error
+            Write-ColorText "TidyAI requires complete responses. Please try again." $Colors.Warning
+            throw "Response was truncated. Cannot process incomplete data."
+        } else {
+            throw "JSON parsing failed: $($_.Exception.Message)"
         }
     }
-    catch {
-        Write-ColorText "Error in manual JSON parsing: $($_.Exception.Message)" $Colors.Error
-        throw
-    }
-    
-    return $folders
 }
+
+# Manual parsing function removed - now using Newtonsoft.Json for all JSON parsing
 
 # Helper function to get partial folder information from severely truncated JSON
 function Get-PartialFolderInfo {
@@ -1080,6 +1607,16 @@ function Main {
     # Show beautiful logo
     Show-Logo
     
+    # Initialize JSON library
+    try {
+        Initialize-JsonLibrary
+    }
+    catch {
+        Write-ColorText "Failed to initialize JSON library: $($_.Exception.Message)" $Colors.Error
+        Read-Host "Press Enter to exit"
+        return
+    }
+    
     # Sanitize the folder path (remove extra quotes and normalize)
     $TargetFolder = $TargetFolder.Trim('"').Trim()
     
@@ -1120,21 +1657,8 @@ function Main {
         return
     }
     
-    # Step 2: Build JSON structure
-    Write-ColorText "Building folder structure..." $Colors.Info
-    $jsonData = Build-FolderJson -Items $items -FolderPath $TargetFolder
-    
-    # Step 3: Send to ChatGPT
-    $response = Send-ToOpenAI -JsonData $jsonData
-    
-    if ($null -eq $response) {
-        Write-ColorText "Failed to get response from ChatGPT. Please check your API key and internet connection." $Colors.Error
-        Read-Host "Press Enter to exit"
-        return
-    }
-    
-    # Step 4: Display the organization tree
-    Show-OrganizationTree -JsonResponse $response
+    # Step 2: Process folder organization using multi-batch system
+    Process-FolderOrganization -Items $items
     
     # Wait for user input before closing
     Write-ColorText "Press Enter to exit..." $Colors.Info

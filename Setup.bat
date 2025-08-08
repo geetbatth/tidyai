@@ -14,6 +14,17 @@ if %errorLevel% == 0 (
 )
 
 :: If not admin, restart as admin
+echo.
+echo     ############ #### ########   ####  ####     ##########    ####
+echo     ############ #### ########   ####  ####     ##########    ####
+echo         ####     #### ####  #### ####  ####     ####  ####    ####
+echo         ####     #### ####  #### ####  ####     ####  ####    ####
+echo         ####     #### ####  ####  ########      ##########    ####
+echo         ####     #### ####  ####   ######       ##########    ####
+echo         ####     #### ####  ####    ####        ####  ####    ####
+echo         ####     #### ########      ####        ####  ####    ####
+echo         ####     #### ########      ####        ####  #### ## ####
+echo.
 echo Requesting Administrator privileges...
 echo.
 echo This will open a new window with Administrator privileges.
