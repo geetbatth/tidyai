@@ -46,16 +46,9 @@ TidyAI includes a powerful undo system that makes organization completely safe a
 
 ### **How It Works**
 - **Automatic Backup**: Before organizing, TidyAI saves your current folder structure to a hidden `.tidyai` file
+- **Undo**: After organizing, TidyAI offers to undo if you dont like the result
 - **Smart Detection**: When you run TidyAI on a previously organized folder, it detects the backup and offers to undo
-- **Complete Restoration**: Undo moves all files back to their exact original locations
-- **Next Run**: If you run TidyAI on a previously organized folder, it will offer to undo
 
-
-
-### **Technical Details**
-- Backup file: `.tidyai` (hidden JSON file in organized folder)
-- Contains: Original structure, new structure, timestamp, version info
-- Cleanup: Automatically removed after successful undo
 
 ## Uninstall
 `appwiz.cpl` → Remove "TidyAI" or run `Uninstall-TidyAI.ps1`
