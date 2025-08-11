@@ -155,6 +155,8 @@ configure_provider() {
 # CLI args parsing
 # ----------------------------
 FOLDER_ARG=""
+IGNORE_DOTFILES=false
+IGNORE_FOLDERS=false
 parse_args() {
   while (( $# > 0 )); do
     case "$1" in
@@ -177,6 +179,10 @@ parse_args() {
         AUTH_SCHEME="$2"; shift 2 ;;
       --azure-api-version)
         AZURE_API_VERSION="$2"; shift 2 ;;
+      --ignore-dotfiles)
+        IGNORE_DOTFILES=true; shift ;;
+      --ignore-folders)
+        IGNORE_FOLDERS=true; shift ;;
       -h|--help)
         usage; exit 0 ;;
       --) shift; break ;;
@@ -433,6 +439,10 @@ scan_folder() {
     if [[ "$base" == "." || "$base" == ".." ]]; then
       continue
     fi
+    # Skip dotfiles if --ignore-dotfiles flag is set
+    if [[ "$IGNORE_DOTFILES" == "true" && "$base" == .* ]]; then
+      continue
+    fi
     ((total++)) || true
   done
 
@@ -441,6 +451,10 @@ scan_folder() {
     local base
     base="$(basename "$entry")"
     if [[ "$base" == "." || "$base" == ".." ]]; then
+      continue
+    fi
+    # Skip dotfiles if --ignore-dotfiles flag is set
+    if [[ "$IGNORE_DOTFILES" == "true" && "$base" == .* ]]; then
       continue
     fi
     ((processed++)) || true
@@ -454,6 +468,10 @@ scan_folder() {
     fi
 
     if [[ -d "$entry" ]]; then
+      # Skip folders if --ignore-folders flag is set
+      if [[ "$IGNORE_FOLDERS" == "true" ]]; then
+        continue
+      fi
       # Folder metadata (direct children only)
       local files_count=0 subfolders_count=0
       local child
@@ -1073,6 +1091,8 @@ Generic API options (OpenAI-compatible):
   --api-key-env VAR        Read API key from environment variable VAR
   --auth-header NAME       Default: Authorization (azure uses: api-key)
   --auth-scheme SCHEME     Default: Bearer; set '' to omit (azure)
+  --ignore-dotfiles        Skip hidden files (files starting with .)
+  --ignore-folders         Skip directories/folders
 
 Azure specifics:
   --azure-api-version VER  Default: 2024-02-15-preview
