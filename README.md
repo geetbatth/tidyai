@@ -14,6 +14,8 @@
 <img src="https://raw.githubusercontent.com/geetbatth/tidyai/main/media/screenshot.jpg" alt="TidyAI Screenshot" width="600">
 </div>
 
+## There is a version in Bash for Unix-based systems. Check it out [here](/README_SHELL.md).
+
 # AI-powered file organization for Windows
 
 ## Features
